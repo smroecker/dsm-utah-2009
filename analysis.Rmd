@@ -1,0 +1,338 @@
+---
+title: "Chapter 5 - Scale Effects on Terrain Attribute Calculation and Their Use as Environmental Covariates for Digital Soil Mapping"
+author: "Stephen Roecker and James Thompson"
+date: "2009"
+output: 
+  html_document: 
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r options, echo=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r packages}
+library(ggplot2)
+library(dplyr)
+```
+
+
+# Case Study 2 - Soil and LSP correlations response to neighborhood size
+
+## Tidy Soil Data
+
+```{r soildata}
+
+library(aqp)
+library(dplyr)
+
+fp <- "C:/Users/Stephen.Roecker/NextCloud/projects/thesis-wvu"
+
+s <- read.csv(file.path(fp, "siteAttributes.csv"), stringsAsFactors = FALSE)
+s[1:4] <- lapply(s[1:4], as.numeric)
+
+h <- read.csv(file.path(fp, "horizonAttributes.csv"), stringsAsFactors = FALSE)
+h$CaMg <- with(h, Ca + Mg) 
+spc <- h
+depths(spc) <- upedonid ~ hzdept + hzdepb
+
+h_s <- aqp::slice(spc, 0:150 ~ fragvol + clay + sand + C + pH + CaMg, just.the.data = TRUE)
+h_s$dep_int <- cut(h_s$hzdepb,
+                   breaks = c(0, 50, 100, 150), 
+                   labels = c("0-50", "50-100", "100-150")
+                   )
+
+h_di <- group_by(h_s, upedonid, dep_int) %>%
+  summarize(fragvol = mean(fragvol, na.rm = TRUE),
+            clay    = mean(clay,    na.rm = TRUE),
+            C       = sum(C),
+            pH      = mean(pH,      na.rm = TRUE),
+            CaMg    = sum(CaMg), 
+            hzthk   = sum(!is.na(.pctMissing))
+            )%>%
+  mutate(fragvol = ifelse(fragvol <= 0.1, 0.1, fragvol),
+          C       = ifelse(C == 0,         NA,  C),
+          CaMg    = ifelse(CaMg == 0,      NA,  CaMg)
+          )
+sh_di <- merge(s, h_di, by = "upedonid", all.x = TRUE)
+
+```
+
+
+## Depth Plots
+
+```{r explore}
+
+library(ggplot2)
+library(GGally)
+
+# Depth Plot
+
+h_slab <- slab(spc, ~ fragvol + clay + C + pH + CaMg)
+
+ggplot(h_slab, aes(x = bottom, y = p.q50)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = p.q5,  ymax = p.q95, x = bottom), alpha = 0.2) + 
+  geom_ribbon(aes(ymin = p.q25, ymax = p.q75, x = bottom), alpha = 0.2) + 
+  xlim(150, 0) +
+  facet_wrap(~ variable, scales = "free_x") +
+  coord_flip() +
+  xlab("depth (cm)") +
+  ylab("5th, 25th, Median, 75th, and 95th Quantiles") +
+  ggtitle("Depth Plot of Soil Properties")
+
+```
+
+
+## Scatter Plot Matrix
+
+```{r spm}
+
+vars <- c("fragvol", "clay", "C")
+ggpairs(h[vars])
+ggpairs(sh_di[vars])
+
+```
+
+
+## Create List of Variables
+
+```{r data frame}
+
+# construct comparison matrix
+ns<- c(27, 45, 63, 81, 135, 189, 243)
+gs <- c(9, 15, 27, 45, 81)
+
+cm <- matrix(ns) %*% (1 / gs)
+colnames(cm) <- gs
+rownames(cm) <- ns
+
+cm[cm != round(cm) & cm / 2 != round(cm / 2)] <- NA
+cm[cm < 3]        <- NA
+cm[cm %% 2 == 0]  <- NA
+cm[upper.tri(cm)] <- NA
+cm_df = data.frame(ns = row.names(cm), cm, check.names = FALSE)
+knitr::kable(cm)
+
+
+# construct data frame of geodata
+geodata <- {
+  expand.grid(source = "samb",
+              res    = c("03m", "06m", "09m", "15m", "27m", "45m", "81m"),
+              ws     = as.numeric(names(table(cm))),
+              var    = c("", "slope", "aspect", "profcurv", "tancurv"),
+              loc = "ug",
+              format  = "tif",
+              stringsAsFactors = FALSE
+              ) ->.;
+  # build file paths
+  within(., {
+    radius = (ws - 1) / 2
+    tif = file.path("M:/geodata/project_data/dsm-utah-2009",
+                   "upper_gauley",
+                   paste0(source, res, "_", loc, 
+                          ifelse(var != "", 
+                                 paste0("_", var, "_", radius), 
+                                 ""
+                                 ),
+                          ".tif")
+                    )
+    asc = file.path("M:/geodata/project_data/dsm-utah-2009",
+                   "upper_gauley/asc",
+                   paste0(source, res, "_", loc, 
+                          ifelse(var != "", 
+                                 paste0("_", var, "_", radius), 
+                                 ""
+                                 ),
+                          ".asc")
+                    )
+    var = ifelse(var == "", "elev", var)
+    }) ->.;
+  subset(.,
+         (res == "09m" & ws %in% cm_df$'9')  |
+         (res == "15m" & ws %in% cm_df$'15') |
+         (res == "27m" & ws %in% cm_df$'27') |
+         (res == "45m" & ws %in% cm_df$'45') |
+         (res == "81m" & ws %in% cm_df$'81')
+         )->.;
+  }
+
+
+# convert the data frame to wide format
+geodata_w <- reshape(geodata,
+       direction = "wide",
+       idvar     = c("res", "ws"),
+       timevar   = "var",
+       v.names   = c("tif", "asc")
+       )
+
+save(geodata, geodata_w, cm_df, file = "C:/Users/Stephen.Roecker/NextCloud/projects/dsm-utah-2009/geodata_df.RData")
+
+```
+
+
+## Sample Geodata and Correlate with Soil Depth Intervals
+
+```{r geodata, eval = FALSE}
+
+library(sp)
+library(raster)
+
+pts <- sh_di
+coordinates(pts) <- ~ utm_easting + utm_northing
+proj4string(pts) <- CRS("+init=epsg:26917")
+
+
+# stack MuSTAnG rasters
+
+load(file = "C:/workspace2/github/dsm-utah-2009/trunk/geodata_df.RData")
+
+sg <- {
+  subset(geodata, ! var == "elev") ->.;
+  split(., .$res) ->.;
+  lapply(., function(x) { 
+    cat("stacking", x$res[1], "\n")
+    rs = stack(x$asc)
+    proj4string(rs) = "+init=epsg:26917"
+    
+    cat("extracting", x$res[1], "\n")
+    sg = as.data.frame(raster::extract(rs, pts, sp = TRUE))
+    
+    # compute northness
+    idx      = grepl("aspect", names(sg))
+    sg[idx]  = lapply(sg[idx], function(x) abs(180 - x))
+    
+    return(sg)
+    }) ->.;
+  }
+
+sg2 <- {
+  lapply(sg, function(x) {
+    cat("correlating and tidying", names(x)[16], "\n")
+    # split by depth interval
+    split(x, x$dep_int) ->.;
+    # compute correlation and convert to long format
+    lapply(., function(x2) {
+      
+      x2[x2 == 0] = NA
+      x2 = na.exclude(x2)
+      x2$fragvol = log(x2$fragvol)
+      x2$C = log(x2$C)
+      
+      test = stack(data.frame(
+        fragvol = cor(x2$fragvol, x2[16:ncol(x2)]), # , use = "pairwise.complete.obs"),
+        clay    = cor(x2$clay,    x2[16:ncol(x2)]), # use = "pairwise.complete.obs"),
+        C       = cor(x2$C,       x2[16:ncol(x2)]) # use = "pairwise.complete.obs"),
+        ))
+        test$ind = as.character(test$ind)
+        # append depth interval
+        test$dep_int = x2$dep_int[1]
+        
+        return(test)
+        }) -> .;
+    do.call("rbind", .) -> test;
+    
+    # split property.filename grouping variable into separate columns
+    test = cbind(
+      test,
+      data.frame(
+        do.call("rbind",
+                strsplit(test$ind, "\\.|_")
+                ),
+        stringsAsFactors = FALSE
+        )
+      )
+    names(test)[4:8] = c("prop", "source", "area", "var", "radius")
+    
+    # split source and variable columns into additional columns
+    test = within(test, {
+      res    = substr(source, 5, 8)
+      res    = as.numeric(substr(res, 1, nchar(res) - 1))
+      source = substr(source, 1, 4)
+      radius = as.numeric(radius)
+      ws     = radius + radius + 1
+      ns     = ws * res
+      res    = factor(res, levels = sort(unique(res)))
+      dep_int = factor(paste(dep_int, "cm"), levels = c("0-50 cm", "50-100 cm", "100-150 cm"))
+      var    = factor(var, levels = c("slope", "aspect", "profcurv", "tancurv"))
+      })
+    }) ->.;
+  do.call("rbind", .) ->.;
+  }
+
+save(sg2, file = "C:/Users/Stephen.Roecker/NextCloud/projects/dsm-utah-2009/soil_correlations.RData")
+
+```
+
+
+## Create Line Plots
+
+### 9-meter DEM and Neighborhood Size Combinations
+```{r 9m-DEM, fig.dim = c(8, 10)}
+
+load(file = "C:/Users/Stephen.Roecker/NextCloud/projects/dsm-utah-2009/soil_correlations.RData")
+
+filter(sg2, res == "9") %>%
+  ggplot(aes(x = ns, y = values, col = var, shape = res)) +
+  geom_point(size = 2.5) +
+  geom_line(lwd = 1) +
+  geom_hline(yintercept = 0) +
+  facet_grid(prop ~ dep_int) +
+  theme(aspect.ratio = 1) +
+  scale_shape_discrete(name = "grid size\n(meters)") +
+  scale_color_discrete(name="terrain\nattribute") +
+  ylim(- 0.5, 0.5) +
+  xlab("neighborhood size (meters)") +
+  ylab("correlation coefficient (r)") +
+  labs(caption = "log transformation applied to fragvol") +
+  ggtitle("Correlation between soil properties and terrain attributes\n over several neighborhood sizes")
+
+```
+
+
+### All DEM Grid Sizes and 3x3 Window Size Combinations
+```{r 3x3, fig.dim = c(8, 10)}
+
+filter(sg2, ws == 3) %>%
+  ggplot(aes(x = ns, y = values, col = var)) +
+  geom_point(aes(shape = res), size = 2.5) +
+  geom_line(lwd = 1) +
+  geom_hline(yintercept = 0) +
+  facet_grid(prop ~ dep_int) +
+  theme(aspect.ratio = 1) +
+  scale_shape_discrete(name = "grid size\n(meters)") +
+  scale_color_discrete(name="terrain\nattribute")+
+  ylim(- 0.5, 0.5) +
+  xlab("neighborhood size (meters)") +
+  ylab("correlation coefficient (r)") +
+  labs(caption = "log transformation applied to fragvol") +
+  ggtitle("Correlation between soil properties and terrain attributes\n over several grid sizes")
+
+```
+
+
+### All DEM Grid and Neighborhood Size Combinations
+
+```{r all-combinations, fig.dim = c(8, 10)}
+
+ggplot(sg2, aes(x = ns, y = values, col = var, shape = res)) +
+  geom_point(size = 2.5, alpha = 0.5) +
+  geom_line(lwd = 1, alpha = 0.5) +
+  geom_hline(yintercept = 0) +
+  facet_grid(prop ~ dep_int) +
+  theme(aspect.ratio = 1) +
+  scale_shape_discrete(name = "grid size\n(meters)") +
+  scale_color_discrete(name="terrain\nattribute")+
+  ylim(- 0.5, 0.5) +
+  xlab("neighborhood size (meters)") +
+  ylab("correlation coefficient (r)") +
+  labs(caption = "log transformation applied to fragvol") +
+  ggtitle("Correlation between soil properties and terrain attributes\n over several grid and neighborhood sizes")
+```
+

@@ -1,0 +1,274 @@
+---
+title: "Preparation of Geodata"
+author: "Stephen Roecker"
+date: "November 5, 2018"
+output: 
+  html_document: 
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r options, echo=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, eval=FALSE)
+```
+
+
+```{r packages}
+library(gdalUtils)
+
+gdal_setInstallation(search_path="C:/Program Files/QGIS 3.2/bin")
+
+source("C:/workspace2/github/geo-pit/trunk/R-geoprocessing/nedFunctions.R")
+source("C:/workspace2/github/geo-pit/trunk/R-geoprocessing/gdalUtilsFunctions.R")
+
+```
+
+
+# Download DEMs
+
+```{r download, eval=FALSE}
+
+fp <- "D:/geodata/project_data/dsm-utah-2009"
+
+
+# lidar
+# Jefferson County - Sheppardstown Quad
+nrcs_gw_box_url <- "https://nrcs.app.box.com/v/elevation/folder/37792511356"
+
+
+# samb
+samb <- data.frame(
+  url = c(
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x50_w080x50_wv_statewide_2003.zip",
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x50_w080x75_wv_statewide_2003.zip",
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x50_w080x25_wv_statewide_2003.zip",
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x25_w080x50_wv_statewide_2003.zip",
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x25_w080x75_wv_statewide_2003.zip",
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/19/IMG/ned19_n38x25_w080x25_wv_statewide_2003.zip"
+    ),
+  stringsAsFactors = FALSE
+  )
+samb <- within(samb, {
+  zip = sapply(url, function(x) unlist(strsplit(x, "\\/"))[8])
+  img = sub("zip", "img", zip)
+  })
+
+# download files
+split(samb, samb$url) ->.;
+lapply(., function(x) {
+  cat("getting", x$url, "\n")
+  download.file(x$url, file.path(fp, x$zip))
+})
+
+# unzip files
+lapply(samb$zip, function(x) {
+  img = sub("zip", "img", x)
+  cat("unzipping", img, "\n")
+  unzip(zipfile = file.path(fp, x), files = img, exdir = fp)
+  })
+
+```
+
+
+# Mosaic SAMB
+
+```{r mosaic}
+# mosaic
+input  <- file.path("D:/geodata/project_data/dsm-utah-2009/upper_gauley", samb$img)
+output <- "D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb19m_ug.tif"
+
+mosaic(input, output, "Float32", c("BIGTIFF=YES"), -99999)
+```
+
+
+# Resample SAMB
+
+```{r resample}
+
+# to avoid stripping in the samb dem its necessary to resample prior to reprojecting
+resample <- function(input, output, res){
+  
+  cat(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"warping", input, "\n")
+  
+  test = raster::raster(input)
+  res = raster::res(test) * (as.numeric(res) / 3)
+  
+  gdalwarp(
+    srcfile = input,
+    dstfile = output,
+    r  = "near",
+    tr = res,
+    of = "GTiff",
+    ot = "Float32",
+    dstnodata = -99999,
+    overwrite = TRUE,
+    verbose   = TRUE
+    )
+  }
+
+# resample
+input <- "D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb19d_ug.tif"
+res   <- c("09", "15", "27", "45", "81")
+
+lapply(res, function(x) {
+  resample(input, sub("19d", paste0(x, "d"), input), as.numeric(x))
+  })
+
+```
+
+
+# Reproject SAMB
+
+```{r reproject}
+
+# reproject
+reproject <- function(input, output, res){
+  
+  cat(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"warping", input, "\n")
+  
+  gdalwarp(
+    srcfile   = input,
+    dstfile   = output,
+    s_srs     = "+init=epsg:4269",
+    t_srs     = "+init=epsg:26917",
+    # using bucubic, bilinear seems to be generating a stripping pattern, even though Frank Warmerdam recommends bilinear for DEMs (http://courses.neteler.org/gdal-raster-data-tips-and-tricks/)
+    r         = "bilinear",            
+    tr        = c(res, res),
+    of        = "GTiff",
+    ot        = "Float32",
+    co        = c("BIGTIFF=YES"),
+    dstnodata = -99999,
+    overwrite = TRUE,
+    verbose   = TRUE
+    )
+  }
+
+# resample
+res1 <- c("09", "15", "27", "45", "81")
+res2 <- c("09", "15", "27", "45", "81")
+test <- data.frame(
+  input  = paste0("D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb", res1, "d_ug.tif"),
+  output = paste0("D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb", res2, "m_ug.tif"),
+  res    = res2,
+  stringsAsFactors = FALSE
+  )
+
+split(test, test$res) ->.;
+lapply(., function(x) {
+  reproject(x$input, x$output, as.numeric(x$res))
+  })
+
+# hillshade
+input  <- "D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb09m_ug.tif"
+dem(input, c("TILED=YES", "COMPRESS=DEFLATE", "BIGTIFF=YES"))
+
+input  <- "D:/geodata/project_data/dsm-utah-2009/upper_gauley/samb27m_ug.tif"
+dem(input, c("TILED=YES", "COMPRESS=DEFLATE", "BIGTIFF=YES"))
+
+```
+
+
+# Create List of Variables
+
+```{r data frame}
+
+# construct comparison matrix
+ns<- c(9, 18, 24, 27, 45, 63, 81, 135, 189, 243)
+gs <- c(3, 6, 9, 15, 27, 45, 81)
+
+cm <- matrix(ns) %*% (1 / gs)
+colnames(cm) <- gs
+rownames(cm) <- ns
+
+cm[cm != round(cm) & cm / 2 != round(cm / 2)] <- NA
+cm[cm < 3]        <- NA
+cm[cm %% 2 == 0]  <- NA
+cm[upper.tri(cm)] <- NA
+cm_df = data.frame(ns = row.names(cm), cm, check.names = FALSE)
+knitr::kable((cm_df[-1] - 1) / 2 )
+
+
+# construct data frame of geodata
+geodata <- {
+  expand.grid(source = "samb",
+              res    = c("09m", "15m", "27m", "45m", "81m"),
+              ws     = as.numeric(names(table(cm))),
+              var    = c("", "slopeR", "slope", "slopeD", "aspect", "cupro", "cucon", "cutan"),
+              loc = "ug",
+              format  = "tif",
+              stringsAsFactors = FALSE
+              ) ->.;
+  # build file paths
+  within(., {
+    radius = (ws - 1) / 2
+    tif = file.path("D:/geodata/project_data/dsm-utah-2009",
+                   "upper_gauley",
+                   paste0(source, res, "_", loc, 
+                          ifelse(var != "", 
+                                 paste0("_", var, ws, "w"), 
+                                 ""
+                                 ),
+                          ".tif")
+                    )
+    asc = file.path("D:/geodata/project_data/dsm-utah-2009",
+                   "upper_gauley/asc",
+                   paste0(source, res, "_", loc, 
+                          ifelse(var != "", 
+                                 paste0("_", var, ws, "w"), 
+                                 ""
+                                 ),
+                          ".asc")
+                    )
+    var = ifelse(var == "", "elev", var)
+    }) ->.;
+  subset(.,
+         (res == "09m" & ws %in% cm_df$'9')  |
+         (res == "15m" & ws %in% cm_df$'15') |
+         (res == "27m" & ws %in% cm_df$'27') |
+         (res == "45m" & ws %in% cm_df$'45') |
+         (res == "81m" & ws %in% cm_df$'81')
+         )->.;
+  }
+
+
+# convert the data frame to wide format
+geodata_w <- reshape(geodata,
+       direction = "wide",
+       idvar     = c("res", "ws"),
+       timevar   = "var",
+       v.names   = c("tif", "asc")
+       )
+```
+
+
+# Export GeoTiff to ASC
+
+```{r}
+
+gdal_tif2asc <- function(x, copy){
+  
+  cat(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"copying", copy,"\n")
+  
+  gdal_translate(
+    src_dataset = x,
+    dst_dataset = copy, 
+    of        = "AAIGrid",  
+    stats     = TRUE,
+    verbose   = TRUE,
+    overwrite = TRUE
+    )
+  }
+
+subset(geodata, ws == 3 & var == "elev") ->.;
+split(., .$res) ->.;
+lapply(., function(x){
+  cat("converting", x$res, "\n")
+  gdal_tif2asc(x$tif, x$asc)
+  })
+
+```
